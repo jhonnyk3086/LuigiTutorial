@@ -1,0 +1,184 @@
+<%
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from sklearn.utils._joblib import load
+from sklearn.metrics import mean_squared_error
+from pandas_profiling import ProfileReport
+import warnings
+from catboost import Pool
+import sys
+from wordcloud import WordCloud, STOPWORDS
+warnings.filterwarnings("ignore")
+DATA_DIR = "/usr/share/data/processed"
+MODEL_DIR = "/usr/share/data/model"
+%>
+
+# Exploratory Data Analysis for wine reviews
+
+```python echo=False
+def read_csv(file_name, header="infer"):
+	df = pd.read_csv(f"{DATA_DIR}/{file_name}", header=header)
+	return df
+
+
+def load_models():
+	models = {}
+	vectorizers = {}
+	for model_name in ["XGBoost", "SVR", "LinearRegression", "LightGBM", "Catboost"]:
+		model = load(f"{MODEL_DIR}/{model_name}/model.pth")
+		if model_name != "Catboost":
+			vectorizer = load(f"{MODEL_DIR}/{model_name}/vectorizer.pth")
+			vectorizers[model_name] = vectorizer
+		models[model_name] = model
+	return models, vectorizers
+
+
+X_train, X_test, y_train, y_test = read_csv("X_train.csv"), read_csv("X_test.csv"), \
+								   read_csv("y_train.csv", header=None), read_csv("y_test.csv", header=None)
+y_test.columns = ["y_test"]
+y_train.columns = ["y_train"]
+models, vectorizers = load_models()
+```
+
+## Basic information of the data
+
+```python echo=False
+ProfileReport(X_train)
+```
+
+## Wordcloud visualization of the words
+
+```python echo=False
+comment_words = ' '
+stopwords = set(STOPWORDS)
+for val in X_train["description"].sample(100):
+    val = str(val)
+    tokens = val.split()
+    for i in range(len(tokens)):
+        tokens[i] = tokens[i].lower()
+    for words in tokens:
+        comment_words = comment_words + words + ' '
+
+wordcloud = WordCloud(width = 1600, height = 800,
+                background_color ='white',
+                stopwords = stopwords,
+                min_font_size = 10).generate(comment_words)
+
+plt.figure(figsize = (8, 5), facecolor = None)
+plt.imshow(wordcloud, aspect="auto")
+plt.axis("off")
+plt.tight_layout()
+plt.show()
+```
+
+## Target variable visualization
+```python echo=False
+
+fig, ax = plt.subplots(1, 2)
+y_train.hist(ax=ax[0])
+y_test.hist(ax=ax[1])
+plt.show()
+```
+
+## Feature importances for words: Which words are most indicative?
+
+```python echo=False
+xgb_regressor = models["XGBoost"]
+xgb_vectorizer = vectorizers["XGBoost"]
+top_words = xgb_regressor.feature_importances_.argsort()[::-1][:10]
+mapping = {y: x for (x, y) in xgb_vectorizer.vocabulary_.items()}
+words = [mapping[x] for x in top_words]
+importances = np.sort(xgb_regressor.feature_importances_)[::-1][:10]
+plt.figure(figsize = (8, 5), facecolor = None)
+plt.bar(words, height=importances)
+plt.tight_layout()
+plt.show()
+```
+
+## Feature importances of numerical and categorical features
+```python echo=False
+def cat_boost_preprocess(data):
+	"""
+	Removes columns with low importances
+	:param data: input dataframe
+	:return: dataframe after dropping columns
+	"""
+	cols = ["description", "title", "region_1"]
+	for col in cols:
+		data = data.drop(col, axis=1)
+	return data.fillna(-1)
+
+
+categorical_columns = ['country', 'designation', 'province',
+        'region_2', 'taster_name', 'taster_twitter_handle', 'variety', 'winery']
+cat_boost = models["Catboost"]
+X_train_tmp = cat_boost_preprocess(X_train.copy())
+feature_imp = pd.DataFrame(list(zip(X_train.dtypes.index, cat_boost.get_feature_importance(Pool(X_train_tmp, label=y_train, cat_features=categorical_columns)))))
+feature_imp.columns = ['FeatureName', 'Importance']
+feature_imp = feature_imp.sort_values(by='Importance', ascending=False)
+cat_features = feature_imp["FeatureName"].tolist()
+cat_importances = feature_imp["Importance"]
+plt.figure(figsize = (8, 5), facecolor = None)
+plt.bar(cat_features, height=cat_importances)
+plt.tight_layout()
+plt.show()
+```
+
+## Evaluation: Comparing multiple models on $R^{2}$
+
+```python echo=False
+
+def evaluate(model_name):
+	model = models[model_name]
+	if model_name == "Catboost":
+		X_test_transformed = cat_boost_preprocess(X_test.copy())
+	else:
+		vectorizer = vectorizers[model_name]
+		X_test_transformed = vectorizer.transform(X_test["description"])
+	score = model.score(X_test_transformed, y_test)
+	return score
+
+
+def calculate_r2():
+	scores = []
+	for model in models:
+		scores.append(evaluate(model))
+	plt.figure(figsize = (8, 5), facecolor = None)
+	plt.bar(models.keys(), height=scores)
+	plt.yscale('log')
+	plt.tight_layout()
+	plt.show()
+
+
+calculate_r2()
+```
+
+## Evaluation: Comparing multiple models on RMSE
+
+```python echo=False
+
+def evaluate(model_name):
+	model = models[model_name]
+	if model_name == "Catboost":
+		X_test_transformed = cat_boost_preprocess(X_test.copy())
+	else:
+		vectorizer = vectorizers[model_name]
+		X_test_transformed = vectorizer.transform(X_test["description"])
+	y_pred = model.predict(X_test_transformed)
+	score = mean_squared_error(y_test, y_pred)
+	return score
+
+
+def calculate_mse():
+	scores = []
+	for model in models:
+		scores.append(evaluate(model))
+	plt.figure(figsize = (8, 5), facecolor = None)
+	plt.bar(models.keys(), height=scores)
+	plt.tight_layout()
+	plt.show()
+
+
+calculate_mse()
+```
